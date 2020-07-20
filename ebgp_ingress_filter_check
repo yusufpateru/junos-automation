@@ -1,0 +1,113 @@
+#check firewall filter on eBGP peering
+
+#!/usr/bin/env python
+# required Ansible helper module
+from ansible.module_utils.basic import AnsibleModule
+
+# required Python modules
+from jnpr.junos.factory import FactoryLoader
+from jnpr.junos import Device
+from re import search
+import unicodedata
+import datetime
+module_import_error = False
+
+try:
+    import os
+    from ansible.module_utils.basic import AnsibleModule
+    from jnpr.junos.utils.start_shell import StartShell
+    from jnpr.junos.factory import FactoryLoader
+    from jnpr.junos import Device
+    from re import search
+    import unicodedata
+    import datetime
+except ImportError as err:
+    module_import_error = True
+    module_msg = 'Error importing required modules: %s' % str(err)
+
+######################################################################
+
+def main():
+    ebgp_without_import_policy = 0
+
+    #get date
+    curr_date = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+    # define arguments from Ansible
+    module = AnsibleModule(
+        argument_spec=dict(
+            host=dict(required=True),
+            user=dict(required=False, default=os.getenv('USER')),
+            passwd=dict(required=False, default=None, no_log=True),
+            port=dict(required=False, type='int', default=830),
+            host_ip=dict(required=False)
+            ),
+        supports_check_mode=False
+        )
+
+    # early exit if required modules failed to import
+    if module_import_error:
+        module.fail_json(msg=module_msg)
+
+    host = module.params['host']
+    username = module.params['user']
+    password = module.params['passwd']
+    ncport = module.params['port']
+    host_ip = module.params['host_ip']
+
+    #Open Juniper device connection
+    try:
+        dev = Device(host=host, gather_facts=False, user=username, passwd=password, port=ncport)
+        dev.open()
+    except Exception as err:
+        msg = 'Error opening device connection: %s' % str(err)
+        module.fail_json(msg=msg)
+
+    #define BGP information operational table and view
+    table_view = {
+        "BgpNeighborTable": {
+            "rpc": "get-bgp-neighbor-information",
+            "item": "bgp-peer",
+            "key": "peer-address",
+            "view": "BgpNeighborView"
+        },
+        "BgpNeighborView": {
+            "fields": {
+                "name": "peer-address",
+                "PeerType": "peer-type",
+                "ImportPolicy": "bgp-option-information/import-policy"
+            }
+        }
+    }
+
+    #load table and view definition
+    try:
+        fl = FactoryLoader()
+    except Exception as err:
+        msg = 'Error loading table and view: %s' % str(err)
+        module.fail_json(msg=msg)
+
+    bgp_neighbor = fl.load(table_view)
+    bgp_table = bgp_neighbor['BgpNeighborTable'](dev)
+
+    #retrieve requested data from device and store it
+    bgp_table.get()
+
+    for bgp_peer in bgp_table:
+        #find external BGP peers without import / ingress policy
+        if (bgp_peer['PeerType'] == "External" and bgp_peer['ImportPolicy'] == None):
+            ebgp_without_import_policy = 1
+
+    #close connection
+    dev.close()
+
+    if (ebgp_without_import_policy == 0):
+        passPercentage = 100
+    else:
+        passPercentage = 0
+    module.exit_json(changed=False, passPercentage=passPercentage)
+
+######################################################################
+
+if __name__ == '__main__':
+    main()
